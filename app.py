@@ -317,34 +317,36 @@ cfg = {
     "mom": st.column_config.NumberColumn("MoM", format="%+.1f%%", help="Growth of the latest selected month over the month before"),
     "mom_pr": st.column_config.NumberColumn("MoM (pro-rata)", format="%+.1f%%", help="Same, with the month in progress at pro-rata"),
 }
-cfg_phone = {
+cfg_phone = {  # same columns as desktop, tighter labels and numbers
+    "rank": st.column_config.NumberColumn("#", width=34, pinned=True),
     "regs": st.column_config.NumberColumn("Regs", format="localized"),
+    "regs_ly": st.column_config.NumberColumn("Last FY*", format="localized"),
     "share": st.column_config.NumberColumn("Share", format="%.1f%%", help="Registrations ÷ total for the filters applied"),
-    "change": st.column_config.NumberColumn("YoY", format="%+.0f%%"),
-    "change_pr": st.column_config.NumberColumn("YoY", format="%+.0f%%"),
-    "mom": st.column_config.NumberColumn("MoM", format="%+.0f%%"),
-    "mom_pr": st.column_config.NumberColumn("MoM", format="%+.0f%%"),
+    "change": st.column_config.NumberColumn("YoY*", format="%+.1f%%"),
+    "change_pr": st.column_config.NumberColumn("YoY (pro-rata)", format="%+.1f%%"),
+    "mom": st.column_config.NumberColumn("MoM", format="%+.1f%%"),
+    "mom_pr": st.column_config.NumberColumn("MoM (pro-rata)", format="%+.1f%%"),
 }
-# on a phone keep the name, registrations, share and the change that matters most
-PHONE_CHANGE = "change_pr" if k["pm_in"] else "change"
-PHONE_MOM = "mom_pr" if k["focus_in_progress"] else "mom"
 
 
 def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str):
-    if compact:
-        cols = [cols[0] if cols[0] != "rank" else cols[1]] + [c_ for c_ in ("regs", "share", PHONE_CHANGE, PHONE_MOM) if c_ in cols]
-        if cols[0] == "office_code":
-            cols[0] = "office"
+    """Every column on desktop and phone; the name column (and rank) stays frozen while scrolling sideways,
+    and the header row stays frozen while scrolling down."""
+    if compact and cols[0] == "office_code":  # on a phone the RTO name is the frozen column
+        cols = ["office", "office_code"] + [c_ for c_ in cols if c_ not in ("office", "office_code")]
+    name_col = next(c_ for c_ in cols if c_ in names and c_ != "office_code") if cols[0] == "office_code" else (cols[1] if cols[0] == "rank" else cols[0])
     out = table[cols].copy()
-    if compact and cols[0] in ("maker", "office"):
-        out[cols[0]] = out[cols[0]].map(lambda s_: short_name(s_, 20))
     for c_ in ("share", "change", "change_pr", "mom", "mom_pr"):
         if c_ in out:
             out[c_] = to_pct_col(out[c_])
-    conf = {**cfg, **(cfg_phone if compact else {}),
-            **{k_: st.column_config.TextColumn(v, width=118 if compact else None) for k_, v in names.items()}}
+    csv = out.to_csv(index=False).encode("utf-8")
+    if compact and name_col in ("maker", "office"):
+        out[name_col] = out[name_col].map(lambda s_: short_name(s_, 20))
+    text_cols = {k_: st.column_config.TextColumn(v, pinned=(k_ == name_col), width=(118 if compact and k_ == name_col else None))
+                 for k_, v in names.items()}
+    conf = {**cfg, "rank": st.column_config.NumberColumn("#", width="small", pinned=True), **(cfg_phone if compact else {}), **text_cols}
     st.dataframe(out, column_config=conf, hide_index=True, width="stretch", height=min(480, 38 + 35 * max(len(out), 1)))
-    st.download_button("Download CSV", out.to_csv(index=False).encode("utf-8"), file_name=fname, mime="text/csv", key=f"dl-{fname}")
+    st.download_button("Download CSV", csv, file_name=fname, mime="text/csv", key=f"dl-{fname}")
 
 
 def fuel_section():
@@ -380,9 +382,9 @@ if compact:
     with tab_mix:
         fuel_section()
         hub_section()
-    st.caption(f"Share = market share within the filters applied. YoY = vs the same months of last FY. MoM = {mom_title}."
-               + (f" YoY and MoM count {pm_name} at pro-rata." if k["pm_in"] else "")
-               + " Switch off Phone layout in the menu (top left) for every column.")
+    st.caption(f"Share = market share within the filters applied. YoY = vs the same months of last FY. MoM = {mom_title}. "
+               f"(pro-rata) columns count {pm_name} at its daily average so far. Swipe tables sideways for every column; "
+               "the name column and headings stay in place.")
 else:
     month_chart()
     fuel_section()
