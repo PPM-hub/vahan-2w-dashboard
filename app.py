@@ -25,11 +25,21 @@ st.set_page_config(page_title="Rajasthan 2W Registrations", page_icon="🛵", la
 
 
 # ---------------------------------------------------------------- data
+# Public, read-only defaults for the "PPM-hub's Project" Supabase project. The anon key can only read
+# the Vahan figures and call the key-protected refresh; secrets or environment variables override these.
+DEFAULTS = {
+    "SUPABASE_URL": "https://dcrnlittunfgaapptmwr.supabase.co",
+    "SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRjcm5saXR0dW5mZ2FhcHB0bXdyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg2OTU1NzUsImV4cCI6MjEwNDI3MTU3NX0.ngDiXC8H7tYNj9BG6h40dAfftVsGxj33-UH2OgAWxLE",
+}
+
+
 def _secret(name: str) -> str | None:
     try:
-        return st.secrets[name]
-    except Exception:
-        return os.environ.get(name)
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:  # noqa: BLE001 - no secrets file at all
+        pass
+    return os.environ.get(name) or DEFAULTS.get(name)
 
 
 def _headers() -> dict:
