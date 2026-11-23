@@ -238,7 +238,7 @@ if compact:
 
     cards = [
         ("Registrations", fmt(k["regs"]), span + (f"<br>Pro-rata {fmt(k['regs_pr'])}" if k["pm_in"] else "")),
-        ("Change vs last FY", _chg(k["change"]),
+        ("YoY growth", _chg(k["change"]),
          (f"Pro-rata {_chg(k['change_pr'])}<br>" if k["pm_in"] and k["change"] is not None else "")
          + (f"{fmt(k['regs'])} vs {fmt(k['regs_ly'])}" if k["change"] is not None else ("Pick one year" if k["no_cmp"] == "multi" else f"{ly_fy} not loaded"))),
         (mom_title, _chg(k["mom"]),
@@ -264,7 +264,7 @@ else:
         m1.caption(f"{span} · pro-rata total {fmt(k['regs_pr'])}")
     else:
         m1.caption(span)
-    m2.metric("Change vs last FY", pct(k["change"]), delta=f"pro-rata {pct(k['change_pr'])}" if k["pm_in"] and k["change"] is not None else None, delta_color="off")
+    m2.metric("YoY growth", pct(k["change"]), delta=f"pro-rata {pct(k['change_pr'])}" if k["pm_in"] and k["change"] is not None else None, delta_color="off")
     m2.caption(f"{fmt(k['regs'])} vs {fmt(k['regs_ly'])}" if k["change"] is not None else "Pick a single year to compare" if k["no_cmp"] == "multi" else f"{ly_fy} is not loaded")
     if k["pm_in"]:
         m3.metric(f"{pm_name} at pro-rata", fmt(k["pm_pr"]), delta=pct(k["pm_change_pr"]) if k["pm_change_pr"] is not None else None)
@@ -312,18 +312,18 @@ cfg = {
     "regs_pr": st.column_config.NumberColumn("Pro-rata", format="localized"),
     "share": st.column_config.ProgressColumn("Share", format="%.1f%%", min_value=0, max_value=100,
                                              help="Market share: registrations ÷ total registrations for the filters applied"),
-    "change": st.column_config.NumberColumn("Change*", format="%+.1f%%"),
-    "change_pr": st.column_config.NumberColumn("Change (pro-rata)", format="%+.1f%%"),
+    "change": st.column_config.NumberColumn("YoY*", format="%+.1f%%", help="Growth over the same months of the previous FY"),
+    "change_pr": st.column_config.NumberColumn("YoY (pro-rata)", format="%+.1f%%", help="Same, with the month in progress at pro-rata"),
     "mom": st.column_config.NumberColumn("MoM", format="%+.1f%%", help="Growth of the latest selected month over the month before"),
     "mom_pr": st.column_config.NumberColumn("MoM (pro-rata)", format="%+.1f%%", help="Same, with the month in progress at pro-rata"),
 }
 cfg_phone = {
     "regs": st.column_config.NumberColumn("Regs", format="localized"),
     "share": st.column_config.NumberColumn("Share", format="%.1f%%", help="Registrations ÷ total for the filters applied"),
-    "change": st.column_config.NumberColumn("Chg", format="%+.0f%%"),
-    "change_pr": st.column_config.NumberColumn("Chg PR", format="%+.0f%%"),
+    "change": st.column_config.NumberColumn("YoY", format="%+.0f%%"),
+    "change_pr": st.column_config.NumberColumn("YoY", format="%+.0f%%"),
     "mom": st.column_config.NumberColumn("MoM", format="%+.0f%%"),
-    "mom_pr": st.column_config.NumberColumn("MoM PR", format="%+.0f%%"),
+    "mom_pr": st.column_config.NumberColumn("MoM", format="%+.0f%%"),
 }
 # on a phone keep the name, registrations, share and the change that matters most
 PHONE_CHANGE = "change_pr" if k["pm_in"] else "change"
@@ -380,7 +380,9 @@ if compact:
     with tab_mix:
         fuel_section()
         hub_section()
-    st.caption(f"Share = market share within the filters applied. Chg = vs same months last FY. MoM = {mom_title}. PR = with {pm_name} at pro-rata. Switch off Phone layout in the menu (top left) for every column.")
+    st.caption(f"Share = market share within the filters applied. YoY = vs the same months of last FY. MoM = {mom_title}."
+               + (f" YoY and MoM count {pm_name} at pro-rata." if k["pm_in"] else "")
+               + " Switch off Phone layout in the menu (top left) for every column.")
 else:
     month_chart()
     fuel_section()
