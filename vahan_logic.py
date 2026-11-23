@@ -12,6 +12,9 @@ Rules (same as the Claude dashboard):
   months a year earlier; the month in progress counts to date against the full month last year.
 - Pro-rata: the month in progress (month of the latest pull) is scaled to a full month at its
   daily average so far: to-date / day of the pull x days in month (e.g. 23 Nov: / 23 x 30).
+- Growth over last month (MoM): the latest selected month vs the calendar month before it
+  (whatever the month filter). If the latest month is in progress it counts to date, and
+  "MoM pro-rata" uses its pro-rata figure instead.
 """
 from __future__ import annotations
 
@@ -35,6 +38,11 @@ def month_label(key: str) -> str:
 
 def fy_of(year: int, month: int) -> int:
     return year if month >= 4 else year - 1
+
+
+def prev_month_key(key: str) -> str:
+    y, m = int(key[:4]), int(key[5:7])
+    return f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
 
 
 def fy_month_keys(fy: int) -> list[tuple[str, int]]:
@@ -102,6 +110,11 @@ class Dash:
         )
         self.sel_cal = {m for _, m in self.sel}
         self.pm_in = any(k == prog.month for k, _ in self.sel)
+        # growth over last month: latest selected month vs the month before it
+        self.focus = self.sel[-1][0] if self.sel else None
+        self.prev = prev_month_key(self.focus) if self.focus else None
+        self.focus_in_progress = self.focus is not None and self.focus == prog.month
+        self.prev_loaded = self.prev is not None and bool((df["month"] == self.prev).any())
 
     # --- slicing -------------------------------------------------------
     def _slice(self, geo=True, rto=True, fuel=True, months=True) -> pd.DataFrame:
@@ -119,10 +132,16 @@ class Dash:
             mask &= d["cal_month"].isin(f.months)
         return d[mask]
 
-    def _compare(self, d: pd.DataFrame, by: str | None) -> pd.DataFrame:
-        """regs, regs_pm, regs_pr, regs_ly, share, change, change_pr grouped by `by` (or one row)."""
+    def _compare(self, d: pd.DataFrame, by: str | None, dm: pd.DataFrame | None = None) -> pd.DataFrame:
+        """regs, regs_pm, regs_pr, regs_ly, share, change, change_pr, plus month-on-month
+        (regs_fm, regs_prev, mom, mom_pr) grouped by `by` (or one row).
+        `dm` is the same slice without the month filter, for the previous month."""
         key = by or "_all"
         d = d.assign(_all="All") if by is None else d
+        if dm is None:
+            dm = d
+        elif by is None:
+            dm = dm.assign(_all="All")
         cur = d[d["fy"].isin(self.fys)]
         out = cur.groupby(key)["regs"].sum().rename("regs").to_frame()
         out["regs_pm"] = cur[cur["month"] == self.prog.month].groupby(key)["regs"].sum()
@@ -144,14 +163,30 @@ class Dash:
             out["regs_ly"] = pd.NA
             out["change"] = pd.NA
             out["change_pr"] = pd.NA
+        # month on month
+        if self.focus and self.prev_loaded:
+            fm = dm[dm["month"] == self.focus].groupby(key)["regs"].sum()
+            pv = dm[dm["month"] == self.prev].groupby(key)["regs"].sum()
+            out["regs_fm"] = fm.reindex(out.index).fillna(0).astype(int)
+            out["regs_prev"] = pv.reindex(out.index).fillna(0).astype(int)
+            base = out["regs_prev"].where(out["regs_prev"] > 0)
+            f = self.prog.factor if self.focus_in_progress else 1.0
+            out["mom"] = out["regs_fm"] / base - 1
+            out["mom_pr"] = (out["regs_fm"] * f) / base - 1
+        else:
+            out["regs_fm"] = pd.NA
+            out["regs_prev"] = pd.NA
+            out["mom"] = pd.NA
+            out["mom_pr"] = pd.NA
         out = out[(out["regs"] > 0) | (pd.to_numeric(out["regs_ly"], errors="coerce").fillna(0) > 0)]
         out["regs"] = out["regs"].astype(int)
         return out.sort_values("regs", ascending=False)
 
     # --- figures -------------------------------------------------------
     def kpi(self) -> dict:
-        t = self._compare(self._slice(), None)
-        row = t.iloc[0].to_dict() if len(t) else {"regs": 0, "regs_pr": 0, "regs_ly": pd.NA, "change": pd.NA, "change_pr": pd.NA, "regs_pm": 0}
+        t = self._compare(self._slice(), None, self._slice(months=False))
+        row = t.iloc[0].to_dict() if len(t) else {"regs": 0, "regs_pr": 0, "regs_ly": pd.NA, "change": pd.NA, "change_pr": pd.NA, "regs_pm": 0,
+                                                  "regs_fm": pd.NA, "regs_prev": pd.NA, "mom": pd.NA, "mom_pr": pd.NA}
         d = self._slice()
         pm_mtd = int(d[(d["month"] == self.prog.month) & d["fy"].isin(self.fys)]["regs"].sum()) if self.pm_in else None
         ly_key = f"{int(self.prog.month[:4]) - 1}{self.prog.month[4:]}" if self.prog.month else ""
@@ -167,6 +202,11 @@ class Dash:
             "pm_mtd": pm_mtd, "pm_pr": pm_pr, "pm_ly": pm_ly,
             "pm_change": (pm_mtd / pm_ly - 1) if pm_mtd is not None and pm_ly else None,
             "pm_change_pr": (pm_pr / pm_ly - 1) if pm_pr is not None and pm_ly else None,
+            "focus": self.focus, "prev": self.prev, "focus_in_progress": self.focus_in_progress,
+            "fm": nan(row.get("regs_fm")),
+            "fm_pr": round(nan(row.get("regs_fm")) * self.prog.factor) if self.focus_in_progress and nan(row.get("regs_fm")) is not None else nan(row.get("regs_fm")),
+            "prev_v": nan(row.get("regs_prev")),
+            "mom": nan(row.get("mom")), "mom_pr": nan(row.get("mom_pr")),
         }
 
     def trend(self) -> pd.DataFrame:
@@ -189,17 +229,17 @@ class Dash:
         return pd.DataFrame(out)
 
     def by_hub(self) -> pd.DataFrame:
-        return self._compare(self._slice(geo=False, rto=False), "hub").reset_index()
+        return self._compare(self._slice(geo=False, rto=False), "hub", self._slice(geo=False, rto=False, months=False)).reset_index()
 
     def by_rto(self) -> pd.DataFrame:
-        t = self._compare(self._slice(rto=False), "office_code")
+        t = self._compare(self._slice(rto=False), "office_code", self._slice(rto=False, months=False))
         info = self.df.drop_duplicates("office_code").set_index("office_code")[["office", "town", "hub"]]
         return t.join(info).reset_index()
 
     def by_fuel(self) -> pd.DataFrame:
-        return self._compare(self._slice(fuel=False), "fuel").reset_index()
+        return self._compare(self._slice(fuel=False), "fuel", self._slice(fuel=False, months=False)).reset_index()
 
     def makers(self) -> pd.DataFrame:
-        t = self._compare(self._slice(), "maker").reset_index()
+        t = self._compare(self._slice(), "maker", self._slice(months=False)).reset_index()
         t.insert(0, "rank", range(1, len(t) + 1))
         return t

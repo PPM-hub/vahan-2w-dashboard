@@ -220,6 +220,12 @@ if len(makers):
     lede += f". {makers.iloc[0]['maker']} leads with {pct(makers.iloc[0]['share'], False)}."
 st.markdown(lede)
 
+mom_title = f"{vl.month_label(k['focus'])} vs {vl.month_label(k['prev'])}" if k["focus"] else "Growth over last month"
+if k["mom"] is not None:
+    mom_detail = (f"{fmt(k['fm'])} to date ({fmt(k['fm_pr'])} pro-rata) vs {fmt(k['prev_v'])}" if k["focus_in_progress"]
+                  else f"{fmt(k['fm'])} vs {fmt(k['prev_v'])}")
+else:
+    mom_detail = f"{vl.month_label(k['prev'])} is not loaded" if k["prev"] else "No months selected"
 span = "" if not k["first"] else vl.month_label(k["first"]) if k["first"] == k["last"] else f"{vl.month_label(k['first'])} – {vl.month_label(k['last'])}"
 if compact:
     import html as _h
@@ -235,6 +241,8 @@ if compact:
         ("Change vs last FY", _chg(k["change"]),
          (f"Pro-rata {_chg(k['change_pr'])}<br>" if k["pm_in"] and k["change"] is not None else "")
          + (f"{fmt(k['regs'])} vs {fmt(k['regs_ly'])}" if k["change"] is not None else ("Pick one year" if k["no_cmp"] == "multi" else f"{ly_fy} not loaded"))),
+        (mom_title, _chg(k["mom"]),
+         (f"Pro-rata {_chg(k['mom_pr'])}<br>" if k["focus_in_progress"] and k["mom"] is not None else "") + mom_detail),
         (f"{pm_name} pro-rata" if k["pm_in"] else "Month in progress", fmt(k["pm_pr"]) if k["pm_in"] else "—",
          (f"{fmt(k['pm_mtd'])} in {prog.elapsed}/{prog.days} days" + (f"<br>vs {fmt(k['pm_ly'])}: {_chg(k['pm_change_pr'])}" if k["pm_ly"] else "")) if k["pm_in"] else "Not in selection"),
         ("Top manufacturer", pct(makers.iloc[0]["share"], False) if len(makers) else "—",
@@ -243,14 +251,14 @@ if compact:
     st.markdown(
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:4px 0 8px">'
         + "".join(
-            '<div style="border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:10px 12px;min-width:0">'
+            f'<div style="border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:10px 12px;min-width:0{";grid-column:span 2" if i == len(cards) - 1 and len(cards) % 2 else ""}">'
             f'<div style="font-size:.78rem;opacity:.75">{_h.escape(lab)}</div>'
             f'<div style="font-size:1.45rem;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums">{val}</div>'
             f'<div style="font-size:.74rem;opacity:.75;line-height:1.35">{sub}</div></div>'
-            for lab, val, sub in cards)
+            for i, (lab, val, sub) in enumerate(cards))
         + "</div>", unsafe_allow_html=True)
 else:
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m5, m3, m4 = st.columns(5)
     m1.metric("Registrations", fmt(k["regs"]), help=f"{span}" + (f"; {pm_name} to {prog.elapsed} {vl.MONTH_NAMES[int(prog.month[5:])]}" if k["pm_in"] else ""))
     if k["pm_in"]:
         m1.caption(f"{span} · pro-rata total {fmt(k['regs_pr'])}")
@@ -264,6 +272,9 @@ else:
     else:
         m3.metric("Month in progress at pro-rata", "—")
         m3.caption("The month in progress isn't in the selected years or months.")
+    m5.metric(mom_title, pct(k["mom"]), delta=f"pro-rata {pct(k['mom_pr'])}" if k["focus_in_progress"] and k["mom"] is not None else None, delta_color="off",
+              help="Latest selected month against the month before it. A month still running counts to date; pro-rata scales it to a full month.")
+    m5.caption(mom_detail)
     if len(makers):
         m4.metric("Top manufacturer", f"{pct(makers.iloc[0]['share'], False)} share")
         m4.caption(f"{makers.iloc[0]['maker']} · {fmt(makers.iloc[0]['regs'])} registrations")
@@ -302,26 +313,31 @@ cfg = {
     "share": st.column_config.ProgressColumn("Share", format="%.1f%%", min_value=0, max_value=100),
     "change": st.column_config.NumberColumn("Change*", format="%+.1f%%"),
     "change_pr": st.column_config.NumberColumn("Change (pro-rata)", format="%+.1f%%"),
+    "mom": st.column_config.NumberColumn("MoM", format="%+.1f%%", help="Growth of the latest selected month over the month before"),
+    "mom_pr": st.column_config.NumberColumn("MoM (pro-rata)", format="%+.1f%%", help="Same, with the month in progress at pro-rata"),
 }
 cfg_phone = {
     "regs": st.column_config.NumberColumn("Regs", format="localized"),
     "share": st.column_config.NumberColumn("Share", format="%.0f%%"),
     "change": st.column_config.NumberColumn("Chg", format="%+.0f%%"),
     "change_pr": st.column_config.NumberColumn("Chg PR", format="%+.0f%%"),
+    "mom": st.column_config.NumberColumn("MoM", format="%+.0f%%"),
+    "mom_pr": st.column_config.NumberColumn("MoM PR", format="%+.0f%%"),
 }
 # on a phone keep the name, registrations, share and the change that matters most
 PHONE_CHANGE = "change_pr" if k["pm_in"] else "change"
+PHONE_MOM = "mom_pr" if k["focus_in_progress"] else "mom"
 
 
 def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str):
     if compact:
-        cols = [cols[0] if cols[0] != "rank" else cols[1]] + [c_ for c_ in ("regs", "share", PHONE_CHANGE) if c_ in cols]
+        cols = [cols[0] if cols[0] != "rank" else cols[1]] + [c_ for c_ in ("regs", PHONE_CHANGE, PHONE_MOM) if c_ in cols]
         if cols[0] == "office_code":
             cols[0] = "office"
     out = table[cols].copy()
     if compact and cols[0] in ("maker", "office"):
         out[cols[0]] = out[cols[0]].map(short_name)
-    for c_ in ("share", "change", "change_pr"):
+    for c_ in ("share", "change", "change_pr", "mom", "mom_pr"):
         if c_ in out:
             out[c_] = to_pct_col(out[c_])
     conf = {**cfg, **(cfg_phone if compact else {}), **{k_: st.column_config.TextColumn(v) for k_, v in names.items()}}
@@ -331,23 +347,23 @@ def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str):
 
 def fuel_section():
     st.subheader("By fuel")
-    show(d.by_fuel(), ["fuel", "regs", "share", "regs_ly", "change", "change_pr"], {"fuel": "Fuel (Vahan name)"}, "vahan_by_fuel.csv")
+    show(d.by_fuel(), ["fuel", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"], {"fuel": "Fuel (Vahan name)"}, "vahan_by_fuel.csv")
 
 
 def hub_section():
     st.subheader("By hub")
     st.caption("All hubs for the selected years, months and fuels.")
-    show(d.by_hub(), ["hub", "regs", "share", "regs_ly", "change", "change_pr"], {"hub": "Hub"}, "vahan_by_hub.csv")
+    show(d.by_hub(), ["hub", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"], {"hub": "Hub"}, "vahan_by_hub.csv")
 
 
 def maker_section():
     st.subheader("Manufacturers")
-    show(makers, ["rank", "maker", "regs", "share", "regs_ly", "change", "change_pr"], {"maker": "Manufacturer"}, "vahan_by_manufacturer.csv")
+    show(makers, ["rank", "maker", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"], {"maker": "Manufacturer"}, "vahan_by_manufacturer.csv")
 
 
 def rto_section():
     st.subheader("By RTO")
-    show(d.by_rto(), ["office_code", "office", "town", "hub", "regs", "share", "regs_ly", "change", "change_pr"],
+    show(d.by_rto(), ["office_code", "office", "town", "hub", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"],
          {"office_code": "Code", "office": "RTO", "town": "Town", "hub": "Hub"}, "vahan_by_rto.csv")
 
 
@@ -362,7 +378,7 @@ if compact:
     with tab_mix:
         fuel_section()
         hub_section()
-    st.caption(f"Chg PR = change with {pm_name} at pro-rata. Switch off Phone layout in the menu (top left) for every column.")
+    st.caption(f"Chg = vs same months last FY. MoM = {mom_title}. PR = with {pm_name} at pro-rata. Switch off Phone layout in the menu (top left) for every column.")
 else:
     month_chart()
     fuel_section()
@@ -370,7 +386,9 @@ else:
     maker_section()
     rto_section()
 
-st.caption("* Same months of the previous FY; the month in progress counts to date against the full month last year. "
+st.caption(f"MoM = growth of {vl.month_label(k['focus']) if k['focus'] else 'the latest selected month'} over the month before; "
+           "a month still running counts to date, and MoM (pro-rata) scales it to a full month. "
+           "* Same months of the previous FY; the month in progress counts to date against the full month last year. "
            f"Pro-rata scales {pm_name} to a full month: to date ÷ {prog.elapsed} × {prog.days}. "
            "Change is shown only when one year is picked.")
 
