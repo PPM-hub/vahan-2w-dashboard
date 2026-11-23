@@ -310,7 +310,8 @@ cfg = {
     "regs": st.column_config.NumberColumn("Registrations", format="localized"),
     "regs_ly": st.column_config.NumberColumn("Last FY*", format="localized"),
     "regs_pr": st.column_config.NumberColumn("Pro-rata", format="localized"),
-    "share": st.column_config.ProgressColumn("Share", format="%.1f%%", min_value=0, max_value=100),
+    "share": st.column_config.ProgressColumn("Share", format="%.1f%%", min_value=0, max_value=100,
+                                             help="Market share: registrations ÷ total registrations for the filters applied"),
     "change": st.column_config.NumberColumn("Change*", format="%+.1f%%"),
     "change_pr": st.column_config.NumberColumn("Change (pro-rata)", format="%+.1f%%"),
     "mom": st.column_config.NumberColumn("MoM", format="%+.1f%%", help="Growth of the latest selected month over the month before"),
@@ -318,7 +319,7 @@ cfg = {
 }
 cfg_phone = {
     "regs": st.column_config.NumberColumn("Regs", format="localized"),
-    "share": st.column_config.NumberColumn("Share", format="%.0f%%"),
+    "share": st.column_config.NumberColumn("Share", format="%.1f%%", help="Registrations ÷ total for the filters applied"),
     "change": st.column_config.NumberColumn("Chg", format="%+.0f%%"),
     "change_pr": st.column_config.NumberColumn("Chg PR", format="%+.0f%%"),
     "mom": st.column_config.NumberColumn("MoM", format="%+.0f%%"),
@@ -331,16 +332,17 @@ PHONE_MOM = "mom_pr" if k["focus_in_progress"] else "mom"
 
 def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str):
     if compact:
-        cols = [cols[0] if cols[0] != "rank" else cols[1]] + [c_ for c_ in ("regs", PHONE_CHANGE, PHONE_MOM) if c_ in cols]
+        cols = [cols[0] if cols[0] != "rank" else cols[1]] + [c_ for c_ in ("regs", "share", PHONE_CHANGE, PHONE_MOM) if c_ in cols]
         if cols[0] == "office_code":
             cols[0] = "office"
     out = table[cols].copy()
     if compact and cols[0] in ("maker", "office"):
-        out[cols[0]] = out[cols[0]].map(short_name)
+        out[cols[0]] = out[cols[0]].map(lambda s_: short_name(s_, 20))
     for c_ in ("share", "change", "change_pr", "mom", "mom_pr"):
         if c_ in out:
             out[c_] = to_pct_col(out[c_])
-    conf = {**cfg, **(cfg_phone if compact else {}), **{k_: st.column_config.TextColumn(v) for k_, v in names.items()}}
+    conf = {**cfg, **(cfg_phone if compact else {}),
+            **{k_: st.column_config.TextColumn(v, width=118 if compact else None) for k_, v in names.items()}}
     st.dataframe(out, column_config=conf, hide_index=True, width="stretch", height=min(480, 38 + 35 * max(len(out), 1)))
     st.download_button("Download CSV", out.to_csv(index=False).encode("utf-8"), file_name=fname, mime="text/csv", key=f"dl-{fname}")
 
@@ -378,7 +380,7 @@ if compact:
     with tab_mix:
         fuel_section()
         hub_section()
-    st.caption(f"Chg = vs same months last FY. MoM = {mom_title}. PR = with {pm_name} at pro-rata. Switch off Phone layout in the menu (top left) for every column.")
+    st.caption(f"Share = market share within the filters applied. Chg = vs same months last FY. MoM = {mom_title}. PR = with {pm_name} at pro-rata. Switch off Phone layout in the menu (top left) for every column.")
 else:
     month_chart()
     fuel_section()
