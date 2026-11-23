@@ -1,0 +1,375 @@
+"""Rajasthan two-wheeler registrations — Streamlit dashboard on the Vahan data in Supabase.
+
+Run locally:   streamlit run app.py
+Secrets (.streamlit/secrets.toml or Streamlit Cloud > Settings > Secrets):
+    SUPABASE_URL = "https://<project>.supabase.co"
+    SUPABASE_ANON_KEY = "<anon / publishable key>"
+Viewers only read data. "Refresh now" sits under Admin in the sidebar and needs the admin key,
+which is checked inside Supabase (public.vahan_refresh_with_key); it is never stored in this app.
+"""
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone, timedelta
+
+import pandas as pd
+import plotly.graph_objects as go
+import requests
+import streamlit as st
+
+import vahan_logic as vl
+
+IST = timezone(timedelta(hours=5, minutes=30))
+st.set_page_config(page_title="Rajasthan 2W Registrations", page_icon="🛵", layout="wide")
+
+
+# ---------------------------------------------------------------- data
+def _secret(name: str) -> str | None:
+    try:
+        return st.secrets[name]
+    except Exception:
+        return os.environ.get(name)
+
+
+def _headers() -> dict:
+    key = _secret("SUPABASE_ANON_KEY")
+    return {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+@st.cache_data(ttl=900, show_spinner="Loading Vahan data from Supabase…")
+def load_payload() -> dict:
+    fixture = os.environ.get("VAHAN_FIXTURE")  # used by tests
+    if fixture:
+        with open(fixture, encoding="utf-8") as fh:
+            return json.load(fh)
+    r = requests.post(f"{_secret('SUPABASE_URL')}/rest/v1/rpc/vahan_app_data", headers=_headers(), json={}, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+
+def start_refresh(admin_key: str) -> tuple[bool, str]:
+    try:
+        r = requests.post(f"{_secret('SUPABASE_URL')}/rest/v1/rpc/vahan_refresh_with_key", headers=_headers(),
+                          json={"p_key": admin_key}, timeout=60)
+    except requests.RequestException as e:
+        return False, f"Couldn't reach Supabase: {e}"
+    if r.status_code == 200:
+        return True, f"Refresh started (run {r.json()}). It takes about 15 minutes; reload the data after that."
+    if "not allowed" in r.text:
+        return False, "That admin key isn't right."
+    return False, f"Supabase refused the request ({r.status_code})."
+
+
+# ---------------------------------------------------------------- formatting
+def fmt(n) -> str:
+    """Indian digit grouping: 12,34,567."""
+    if n is None or (isinstance(n, float) and pd.isna(n)):
+        return "—"
+    n = int(round(n))
+    s, neg = str(abs(n)), n < 0
+    if len(s) > 3:
+        head, tail = s[:-3], s[-3:]
+        parts = []
+        while len(head) > 2:
+            parts.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            parts.insert(0, head)
+        s = ",".join(parts + [tail])
+    return ("-" if neg else "") + s
+
+
+def pct(x, signed=True) -> str:
+    if x is None or (isinstance(x, float) and pd.isna(x)) or x is pd.NA:
+        return "—"
+    return f"{'+' if signed and x > 0 else ''}{x * 100:.1f}%"
+
+
+_DROP = {"LTD", "LTD.", "LIMITED", "PVT", "PVT.", "PRIVATE", "(P)", "INDIA", "THE", "CO", "CO.", "COMPANY", "TECHNOLOGIES"}
+
+
+def _cap(word: str) -> str:
+    if word == "&" or any(ch.isdigit() for ch in word):
+        return word
+    core = word.strip("()")
+    if len(core) <= 3:  # TVS, RTO, DTO, BMW, KTM
+        return word.upper()
+    return "-".join(p[:1].upper() + p[1:].lower() if not p.startswith("(") else "(" + p[1:2].upper() + p[2:].lower()
+                    for p in word.split("-"))
+
+
+def short_name(name: str, limit: int = 26) -> str:
+    """'HONDA MOTORCYCLE AND SCOOTER INDIA (P) LTD' -> 'Honda Motorcycle & Scooter' (phone tables)."""
+    import re as _re
+    s = _re.sub(r"\(UNIT OF [^)]*\)", "", str(name)).replace(" AND ", " & ")
+    words = [w for w in s.split() if w.upper() not in _DROP]
+    s = " ".join(_cap(w) for w in words) or str(name)
+    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
+
+
+def to_pct_col(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce") * 100
+
+
+# ---------------------------------------------------------------- load
+try:
+    payload = load_payload()
+except Exception as e:  # noqa: BLE001
+    st.error(f"Couldn't load data from Supabase. Check SUPABASE_URL and SUPABASE_ANON_KEY in the app's secrets. ({e})")
+    st.stop()
+
+df = vl.build_frame(payload)
+status = payload.get("status") or {}
+prog = vl.progress_from(status, df)
+offices = pd.DataFrame(payload.get("offices") or [])
+now_ist = datetime.now(IST)
+cur_fy = vl.fy_of(now_ist.year, now_ist.month)
+
+# ---------------------------------------------------------------- phone or desktop layout
+_ua = ""
+try:
+    _ua = st.context.headers.get("User-Agent", "") or ""
+except Exception:  # noqa: BLE001
+    pass
+_is_phone = any(s in _ua for s in ("Mobi", "Android", "iPhone", "iPad"))
+
+# ---------------------------------------------------------------- sidebar: admin
+with st.sidebar:
+    compact = st.toggle("Phone layout", value=_is_phone, help="Fewer columns, folded filters and tabs. Switches on by itself on phones.")
+    st.subheader("Data")
+    if status.get("last_refresh"):
+        lr = datetime.fromisoformat(status["last_refresh"].replace("Z", "+00:00")).astimezone(IST)
+        st.write(f"Vahan data refreshed **{lr:%d %b, %H:%M} IST**. Updates daily at 10:00 IST.")
+    if status.get("jobs_left"):
+        st.info(f"A refresh is running: {status['jobs_left']} offices to go.")
+    diff = (status.get("portal_total") or 0) - (status.get("office_total") or 0)
+    if diff == 0:
+        st.success("RTO figures add up to Vahan's state total.")
+    else:
+        st.warning(f"RTO figures are {fmt(abs(diff))} {'short of' if diff > 0 else 'over'} Vahan's state total.")
+    if st.button("Reload data", help="Fetch the latest stored figures from Supabase"):
+        load_payload.clear()
+        st.rerun()
+    with st.expander("Admin"):
+        key = st.text_input("Admin key", type="password", help="Only needed to start a fresh pull from Vahan.")
+        if st.button("Refresh now", disabled=not key):
+            ok, msg = start_refresh(key)
+            (st.success if ok else st.error)(msg)
+
+# ---------------------------------------------------------------- filters
+if compact:
+    st.markdown("### Rajasthan 2W registrations")
+    if status.get("last_refresh"):
+        _lr = datetime.fromisoformat(status["last_refresh"].replace("Z", "+00:00")).astimezone(IST)
+        st.caption(f"Vahan data as of {_lr:%d %b, %H:%M} IST · 2WN + 2WT + 2WIC")
+else:
+    st.title("Rajasthan two-wheeler registrations")
+    st.caption("Vahan 4 · Two-wheelers (2WN + 2WT + 2WIC) · by RTO, manufacturer and fuel")
+
+_picked = sum(bool(st.session_state.get(n)) for n in ("f_hub", "f_town", "f_rto", "f_month", "f_fuel"))
+if compact:
+    _box = st.expander(f"Filters{f' · {_picked} in use' if _picked else ''}", expanded=False)
+    _r1, _r2, _r3 = _box.columns(2), _box.columns(2), _box.columns(2)
+    c = [_r1[0], _r1[1], _r2[0], _r2[1], _r3[0], _r3[1]]
+else:
+    c = st.columns(6)
+hubs = c[0].multiselect("Hub", sorted(offices["hub"].unique()) if len(offices) else [], placeholder="All hubs", key="f_hub")
+town_opts = sorted(offices[offices["hub"].isin(hubs) | (not hubs)]["town"].unique()) if len(offices) else []
+towns = c[1].multiselect("Town", town_opts, placeholder="All towns", key="f_town")
+rto_rows = offices[(offices["hub"].isin(hubs) | (not hubs)) & (offices["town"].isin(towns) | (not towns))].sort_values("office") if len(offices) else offices
+rto_labels = {r.code: f"{r.office} ({r.code})" for r in rto_rows.itertuples()}
+rtos = c[2].multiselect("RTO", list(rto_labels), format_func=lambda k: rto_labels.get(k, k), placeholder="All RTOs", key="f_rto")
+fy_opts = sorted(df["fy"].unique().tolist(), reverse=True)
+fys = c[3].multiselect("Year", fy_opts, default=[cur_fy] if cur_fy in fy_opts else fy_opts[:1], format_func=lambda y: f"FY {y % 100:02d}-{(y + 1) % 100:02d}", placeholder="All years", key="f_fy")
+months = c[4].multiselect("Month", vl.FY_MONTHS, format_func=lambda m: vl.MONTH_NAMES[m], placeholder="All months", key="f_month")
+fuel_opts = df.groupby("fuel")["regs"].sum().sort_values(ascending=False).index.tolist()
+fuels = c[5].multiselect("Fuel", fuel_opts, placeholder="All fuels", key="f_fuel")
+
+f = vl.Filters(hubs=hubs, towns=towns, rtos=rtos, fys=fys, months=months, fuels=fuels)
+d = vl.Dash(df, f, prog)
+k = d.kpi()
+makers = d.makers()
+
+# ---------------------------------------------------------------- headline
+place = (", ".join(rto_labels.get(r, r) for r in rtos) if 0 < len(rtos) <= 2 else f"{len(rtos)} RTOs" if rtos
+         else ", ".join(towns) if 0 < len(towns) <= 2 else f"{len(towns)} towns" if towns
+         else ", ".join(hubs) + " hub" + ("s" if len(hubs) > 1 else "") if 0 < len(hubs) <= 2 else f"{len(hubs)} hubs" if hubs
+         else "Rajasthan")
+years = " + ".join(vl.fy_label(y) for y in d.fys)
+pm_name = vl.month_label(prog.month) if prog.month else ""
+ly_fy = vl.fy_label(d.fys[0] - 1) if d.fys else ""
+lede = f"**{place}, {years}{', ' + ', '.join(fuels) if fuels else ''}:** {fmt(k['regs'])} registrations"
+if k["change"] is not None:
+    lede += f", **{pct(k['change'])}** on the same months of {ly_fy}"
+    if k["pm_in"]:
+        lede += f" (**{pct(k['change_pr'])}** with {pm_name} at pro-rata)"
+else:
+    lede += " (no comparison: " + ("pick a single year to compare" if k["no_cmp"] == "multi" else f"{ly_fy} is not loaded") + ")"
+if len(makers):
+    lede += f". {makers.iloc[0]['maker']} leads with {pct(makers.iloc[0]['share'], False)}."
+st.markdown(lede)
+
+span = "" if not k["first"] else vl.month_label(k["first"]) if k["first"] == k["last"] else f"{vl.month_label(k['first'])} – {vl.month_label(k['last'])}"
+if compact:
+    import html as _h
+
+    def _chg(x):
+        if x is None:
+            return "—"
+        col = "#15803d" if x > 0 else "#b91c1c" if x < 0 else "inherit"
+        return f'<span style="color:{col}">{pct(x)}</span>'
+
+    cards = [
+        ("Registrations", fmt(k["regs"]), span + (f"<br>Pro-rata {fmt(k['regs_pr'])}" if k["pm_in"] else "")),
+        ("Change vs last FY", _chg(k["change"]),
+         (f"Pro-rata {_chg(k['change_pr'])}<br>" if k["pm_in"] and k["change"] is not None else "")
+         + (f"{fmt(k['regs'])} vs {fmt(k['regs_ly'])}" if k["change"] is not None else ("Pick one year" if k["no_cmp"] == "multi" else f"{ly_fy} not loaded"))),
+        (f"{pm_name} pro-rata" if k["pm_in"] else "Month in progress", fmt(k["pm_pr"]) if k["pm_in"] else "—",
+         (f"{fmt(k['pm_mtd'])} in {prog.elapsed}/{prog.days} days" + (f"<br>vs {fmt(k['pm_ly'])}: {_chg(k['pm_change_pr'])}" if k["pm_ly"] else "")) if k["pm_in"] else "Not in selection"),
+        ("Top manufacturer", pct(makers.iloc[0]["share"], False) if len(makers) else "—",
+         _h.escape(short_name(makers.iloc[0]["maker"], 28)) if len(makers) else ""),
+    ]
+    st.markdown(
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:4px 0 8px">'
+        + "".join(
+            '<div style="border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:10px 12px;min-width:0">'
+            f'<div style="font-size:.78rem;opacity:.75">{_h.escape(lab)}</div>'
+            f'<div style="font-size:1.45rem;font-weight:600;line-height:1.25;font-variant-numeric:tabular-nums">{val}</div>'
+            f'<div style="font-size:.74rem;opacity:.75;line-height:1.35">{sub}</div></div>'
+            for lab, val, sub in cards)
+        + "</div>", unsafe_allow_html=True)
+else:
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Registrations", fmt(k["regs"]), help=f"{span}" + (f"; {pm_name} to {prog.elapsed} {vl.MONTH_NAMES[int(prog.month[5:])]}" if k["pm_in"] else ""))
+    if k["pm_in"]:
+        m1.caption(f"{span} · pro-rata total {fmt(k['regs_pr'])}")
+    else:
+        m1.caption(span)
+    m2.metric("Change vs last FY", pct(k["change"]), delta=f"pro-rata {pct(k['change_pr'])}" if k["pm_in"] and k["change"] is not None else None, delta_color="off")
+    m2.caption(f"{fmt(k['regs'])} vs {fmt(k['regs_ly'])}" if k["change"] is not None else "Pick a single year to compare" if k["no_cmp"] == "multi" else f"{ly_fy} is not loaded")
+    if k["pm_in"]:
+        m3.metric(f"{pm_name} at pro-rata", fmt(k["pm_pr"]), delta=pct(k["pm_change_pr"]) if k["pm_change_pr"] is not None else None)
+        m3.caption(f"{fmt(k['pm_mtd'])} so far over {prog.elapsed} of {prog.days} days" + (f" · {vl.MONTH_NAMES[int(prog.month[5:])]} {int(prog.month[:4]) - 1}: {fmt(k['pm_ly'])} ({pct(k['pm_change'])} to date)" if k["pm_ly"] else ""))
+    else:
+        m3.metric("Month in progress at pro-rata", "—")
+        m3.caption("The month in progress isn't in the selected years or months.")
+    if len(makers):
+        m4.metric("Top manufacturer", f"{pct(makers.iloc[0]['share'], False)} share")
+        m4.caption(f"{makers.iloc[0]['maker']} · {fmt(makers.iloc[0]['regs'])} registrations")
+
+
+# ---------------------------------------------------------------- month by month
+def month_chart():
+    st.subheader("Month by month")
+    t = d.trend()
+    fy_main = int(t["fy"].iloc[0]) if len(t) else cur_fy
+    colors = ["rgba(37,99,235,%s)" % (0.45 if r.in_progress else 1 if r.picked else 0.3) for r in t.itertuples()]
+    fig = go.Figure()
+    labels = [("≈" + fmt(r.regs_pr)) if r.in_progress and r.regs_pr else (fmt(r.regs) if r.regs is not None else "") for r in t.itertuples()]
+    fig.add_bar(x=t["label"], y=t["regs"], name=vl.fy_label(fy_main), marker_color=colors,
+                text=None if compact else labels, textposition="outside", cliponaxis=False,
+                hovertemplate="%{x}: %{y:,}<extra></extra>")
+    fig.add_scatter(x=t["label"], y=t["regs_ly"], name=vl.fy_label(fy_main - 1), mode="lines+markers", line=dict(color="#6b7280", width=2))
+    for r in t.itertuples():
+        if r.in_progress and r.regs_pr:
+            i = list(t["label"]).index(r.label)
+            fig.add_shape(type="rect", x0=i - 0.4, x1=i + 0.4, y0=0, y1=r.regs_pr, line=dict(color="rgba(37,99,235,1)", dash="dash", width=1.5))
+    fig.update_layout(height=260 if compact else 360, margin=dict(l=4, r=4, t=30, b=4),
+                      legend=dict(orientation="h", y=1.15), bargap=0.25 if compact else 0.3,
+                      yaxis=dict(title=None, gridcolor="rgba(128,128,128,0.2)", tickformat="~s"), xaxis=dict(title=None, tickangle=0),
+                      dragmode=False)
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False, "scrollZoom": False})
+    st.caption("Bars: latest selected FY. Line: the year before. The month in progress is pale to date, with a dashed outline at pro-rata.")
+
+
+# ---------------------------------------------------------------- tables
+cfg = {
+    "rank": st.column_config.NumberColumn("#", width="small"),
+    "regs": st.column_config.NumberColumn("Registrations", format="localized"),
+    "regs_ly": st.column_config.NumberColumn("Last FY*", format="localized"),
+    "regs_pr": st.column_config.NumberColumn("Pro-rata", format="localized"),
+    "share": st.column_config.ProgressColumn("Share", format="%.1f%%", min_value=0, max_value=100),
+    "change": st.column_config.NumberColumn("Change*", format="%+.1f%%"),
+    "change_pr": st.column_config.NumberColumn("Change (pro-rata)", format="%+.1f%%"),
+}
+cfg_phone = {
+    "regs": st.column_config.NumberColumn("Regs", format="localized"),
+    "share": st.column_config.NumberColumn("Share", format="%.0f%%"),
+    "change": st.column_config.NumberColumn("Chg", format="%+.0f%%"),
+    "change_pr": st.column_config.NumberColumn("Chg PR", format="%+.0f%%"),
+}
+# on a phone keep the name, registrations, share and the change that matters most
+PHONE_CHANGE = "change_pr" if k["pm_in"] else "change"
+
+
+def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str):
+    if compact:
+        cols = [cols[0] if cols[0] != "rank" else cols[1]] + [c_ for c_ in ("regs", "share", PHONE_CHANGE) if c_ in cols]
+        if cols[0] == "office_code":
+            cols[0] = "office"
+    out = table[cols].copy()
+    if compact and cols[0] in ("maker", "office"):
+        out[cols[0]] = out[cols[0]].map(short_name)
+    for c_ in ("share", "change", "change_pr"):
+        if c_ in out:
+            out[c_] = to_pct_col(out[c_])
+    conf = {**cfg, **(cfg_phone if compact else {}), **{k_: st.column_config.TextColumn(v) for k_, v in names.items()}}
+    st.dataframe(out, column_config=conf, hide_index=True, width="stretch", height=min(480, 38 + 35 * max(len(out), 1)))
+    st.download_button("Download CSV", out.to_csv(index=False).encode("utf-8"), file_name=fname, mime="text/csv", key=f"dl-{fname}")
+
+
+def fuel_section():
+    st.subheader("By fuel")
+    show(d.by_fuel(), ["fuel", "regs", "share", "regs_ly", "change", "change_pr"], {"fuel": "Fuel (Vahan name)"}, "vahan_by_fuel.csv")
+
+
+def hub_section():
+    st.subheader("By hub")
+    st.caption("All hubs for the selected years, months and fuels.")
+    show(d.by_hub(), ["hub", "regs", "share", "regs_ly", "change", "change_pr"], {"hub": "Hub"}, "vahan_by_hub.csv")
+
+
+def maker_section():
+    st.subheader("Manufacturers")
+    show(makers, ["rank", "maker", "regs", "share", "regs_ly", "change", "change_pr"], {"maker": "Manufacturer"}, "vahan_by_manufacturer.csv")
+
+
+def rto_section():
+    st.subheader("By RTO")
+    show(d.by_rto(), ["office_code", "office", "town", "hub", "regs", "share", "regs_ly", "change", "change_pr"],
+         {"office_code": "Code", "office": "RTO", "town": "Town", "hub": "Hub"}, "vahan_by_rto.csv")
+
+
+if compact:
+    tab_trend, tab_makers, tab_rto, tab_mix = st.tabs(["Trend", "Makers", "RTOs", "Fuel & hub"])
+    with tab_trend:
+        month_chart()
+    with tab_makers:
+        maker_section()
+    with tab_rto:
+        rto_section()
+    with tab_mix:
+        fuel_section()
+        hub_section()
+    st.caption(f"Chg PR = change with {pm_name} at pro-rata. Switch off Phone layout in the menu (top left) for every column.")
+else:
+    month_chart()
+    fuel_section()
+    hub_section()
+    maker_section()
+    rto_section()
+
+st.caption("* Same months of the previous FY; the month in progress counts to date against the full month last year. "
+           f"Pro-rata scales {pm_name} to a full month: to date ÷ {prog.elapsed} × {prog.days}. "
+           "Change is shown only when one year is picked.")
+
+with st.expander("How these numbers are built"):
+    st.markdown(
+        "- **Source:** Vahan 4 dashboard (MoRTH), Maker × Month report for Rajasthan, run separately for every RTO/DTO and fuel type, "
+        "pulled into Supabase daily at 10:00 IST.\n"
+        "- **Two-wheelers** = 2WN (non-transport) + 2WT (transport) + 2WIC (invalid carriage).\n"
+        "- **Financial year** runs April–March.\n"
+        "- **Fuel** names are Vahan's own; PURE EV and ELECTRIC(BOV) are both battery-electric.\n"
+        "- **Town and Hub** come from your office mapping.\n"
+        "- Every month is checked against Vahan's own state-wide total (see the sidebar).")
