@@ -243,3 +243,22 @@ class Dash:
         t = self._compare(self._slice(), "maker", self._slice(months=False)).reset_index()
         t.insert(0, "rank", range(1, len(t) + 1))
         return t
+
+    def rto_makers(self, code: str) -> pd.DataFrame:
+        """Makers within one RTO for the current year/month/fuel filters (share is within that RTO)."""
+        f = Filters(hubs=[], towns=[], rtos=[code], fys=self.f.fys, months=self.f.months, fuels=self.f.fuels)
+        return Dash(self.df, f, self.prog).makers()
+
+    def all_rto_makers(self) -> pd.DataFrame:
+        """Every RTO x maker in the selection (for download): one block of rto_makers() per RTO."""
+        info = self.df.drop_duplicates("office_code").set_index("office_code")[["office", "town", "hub"]]
+        parts = []
+        for code in self.by_rto()["office_code"]:
+            m = self.rto_makers(code)
+            if len(m):
+                m.insert(0, "office_code", code)
+                parts.append(m)
+        if not parts:
+            return pd.DataFrame()
+        out = pd.concat(parts, ignore_index=True)
+        return out.join(info, on="office_code")

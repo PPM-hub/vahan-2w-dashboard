@@ -329,7 +329,7 @@ cfg_phone = {  # same columns as desktop, tighter labels and numbers
 }
 
 
-def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str):
+def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str, select_key: str | None = None):
     """Every column on desktop and phone; the name column (and rank) stays frozen while scrolling sideways,
     and the header row stays frozen while scrolling down."""
     if compact and cols[0] == "office_code":  # on a phone the RTO name is the frozen column
@@ -345,8 +345,11 @@ def show(table: pd.DataFrame, cols: list[str], names: dict, fname: str):
     text_cols = {k_: st.column_config.TextColumn(v, pinned=(k_ == name_col), width=(118 if compact and k_ == name_col else None))
                  for k_, v in names.items()}
     conf = {**cfg, "rank": st.column_config.NumberColumn("#", width="small", pinned=True), **(cfg_phone if compact else {}), **text_cols}
-    st.dataframe(out, column_config=conf, hide_index=True, width="stretch", height=min(480, 38 + 35 * max(len(out), 1)))
+    extra = dict(on_select="rerun", selection_mode="single-row", key=select_key) if select_key else {}
+    event = st.dataframe(out, column_config=conf, hide_index=True, width="stretch",
+                         height=min(480, 38 + 35 * max(len(out), 1)), **extra)
     st.download_button("Download CSV", csv, file_name=fname, mime="text/csv", key=f"dl-{fname}")
+    return event
 
 
 def fuel_section():
@@ -365,10 +368,48 @@ def maker_section():
     show(makers, ["rank", "maker", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"], {"maker": "Manufacturer"}, "vahan_by_manufacturer.csv")
 
 
+@st.cache_data(ttl=900, show_spinner="Building the RTO × maker file…")
+def all_rto_makers_csv(_d, key: tuple) -> bytes:
+    t = _d.all_rto_makers()
+    if not len(t):
+        return b""
+    t = t[["office_code", "office", "town", "hub", "rank", "maker", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"]].copy()
+    for c_ in ("share", "change", "change_pr", "mom", "mom_pr"):
+        t[c_] = (pd.to_numeric(t[c_], errors="coerce") * 100).round(2)
+    return t.rename(columns={"rank": "rank_in_rto", "share": "share_in_rto_%", "change": "yoy_%", "change_pr": "yoy_prorata_%",
+                             "mom": "mom_%", "mom_pr": "mom_prorata_%"}).to_csv(index=False).encode("utf-8")
+
+
 def rto_section():
     st.subheader("By RTO")
-    show(d.by_rto(), ["office_code", "office", "town", "hub", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"],
-         {"office_code": "Code", "office": "RTO", "town": "Town", "hub": "Hub"}, "vahan_by_rto.csv")
+    rto_t = d.by_rto()
+    st.caption("Tap a row (or pick an RTO below) to see every manufacturer in that RTO.")
+    event = show(rto_t, ["office_code", "office", "town", "hub", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"],
+                 {"office_code": "Code", "office": "RTO", "town": "Town", "hub": "Hub"}, "vahan_by_rto.csv", select_key="rto_table")
+
+    codes = rto_t["office_code"].tolist()
+    names_ = dict(zip(rto_t["office_code"], rto_t["office"]))
+    rows = list(event.selection.rows) if event is not None and hasattr(event, "selection") else []
+    picked_row = codes[rows[0]] if rows and rows[0] < len(codes) else None
+    if picked_row != st.session_state.get("_rto_row_prev"):  # a new row tap updates the dropdown
+        st.session_state["_rto_row_prev"] = picked_row
+        if picked_row:
+            st.session_state["rto_drill"] = picked_row
+    if st.session_state.get("rto_drill") not in codes:
+        st.session_state["rto_drill"] = None
+    choice = st.selectbox("Manufacturers in RTO", [None] + codes, key="rto_drill",
+                          format_func=lambda c_: "Pick an RTO…" if c_ is None else f"{names_.get(c_, c_)} ({c_})")
+    if choice:
+        st.markdown(f"**Manufacturers in {names_.get(choice, choice)} ({choice})**")
+        show(d.rto_makers(choice), ["rank", "maker", "regs", "share", "regs_ly", "change", "change_pr", "mom", "mom_pr"],
+             {"maker": "Manufacturer"}, f"vahan_makers_{choice}.csv")
+        st.caption("Share here is within this RTO. Year, month and fuel filters apply.")
+
+    key = (tuple(hubs), tuple(towns), tuple(rtos), tuple(d.fys), tuple(months), tuple(fuels), status.get("last_refresh"))
+    data = all_rto_makers_csv(d, key) if st.toggle("Prepare all RTOs × manufacturers for download", key="rto_all_toggle") else b""
+    if data:
+        st.download_button("Download all RTOs × manufacturers (CSV)", data, file_name="vahan_rto_x_manufacturer.csv",
+                           mime="text/csv", key="dl-rto-x-maker")
 
 
 if compact:
